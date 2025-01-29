@@ -26,5 +26,4 @@ USER hono
 ARG PORT=3000
 EXPOSE ${PORT}
 
-ENV NODE_TLS_REJECT_UNAUTHORIZED=0
 CMD ["node", "/app/dist/index.mjs"]
