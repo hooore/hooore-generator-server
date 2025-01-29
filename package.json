@@ -1,0 +1,19 @@
+{
+  "name": "my-app",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=./.env src/index.ts",
+    "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --outfile=dist/index.mjs --format=esm"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.6.19",
+    "postgres": "^3.4.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.17",
+    "esbuild": "^0.23.1",
+    "tsx": "^4.7.1",
+    "typescript": "^5.5.4"
+  }
+}
