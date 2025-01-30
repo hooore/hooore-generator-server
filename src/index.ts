@@ -210,8 +210,13 @@ app.post("/api/publish/:projectId", async (c) => {
       const logs = JSON.parse(deploymentLog.logs) as {
         output: string;
       }[];
-      const lastLog = logs?.findLast((log) => log.output.startsWith("#"));
-      step = Number(lastLog?.output.split(" ")[0]?.replace("#", ""));
+      const lastLog = logs
+        ?.findLast((log) => log.output.startsWith("#"))
+        ?.output.split("\n")
+        .findLast((log) => log.startsWith("#"));
+      step = Number(lastLog?.split(" ")[0]?.replace("#", ""));
+      console.log("step", step);
+      console.log("lastLog", lastLog);
       if (step) {
         await setProjectBuildStep(project.id, step, totalSteps);
       }
