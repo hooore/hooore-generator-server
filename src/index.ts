@@ -1,22 +1,19 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { exec, spawn } from "node:child_process";
-import util from "node:util";
+import process from "node:process";
 import postgres from "postgres";
-
-const execAsync = util.promisify(exec);
 
 const sql = postgres(process.env.PG_URL);
 
 type ProjectSchema = {
+  business_name_slug: string;
   business_name: string;
   business_logo: string;
   id: string;
-  domain: string;
   user_id: string;
   need_publish: boolean;
-  build_pid: string;
+  app_id: string;
   build_last_step: number;
   build_total_step: number;
   env: {
@@ -32,12 +29,12 @@ async function getProject(projectId: string, userId: string) {
   const [project] = await sql<[ProjectSchema?]>`
       SELECT
             id,
-            domain,
             user_id,
             business_name,
+            business_name_slug,
             business_logo,
             env,
-            build_pid,
+            app_id,
             build_last_step,
             build_total_step
       FROM project
@@ -49,10 +46,8 @@ async function getProject(projectId: string, userId: string) {
   return project;
 }
 
-async function setProjectBuildPID(projectId: string, pid: number | null) {
-  await sql`UPDATE project SET build_pid = ${
-    pid !== null ? String(pid) : ""
-  } WHERE id = ${projectId}`;
+async function setProjectAppID(projectId: string, appId: string) {
+  await sql`UPDATE project SET app_id = ${appId} WHERE id = ${projectId}`;
 }
 
 async function setProjectBuildStep(
@@ -63,168 +58,95 @@ async function setProjectBuildStep(
   await sql`UPDATE project SET build_last_step = ${lastStep}, build_total_step = ${totalStep} WHERE id = ${projectId}`;
 }
 
-async function killPID(pid: number | null) {
-  if (pid === null) {
-    return;
-  }
-
-  await execAsync(`kill -9 ${pid}`);
-}
-
-async function checkPID(pid: number | null) {
-  if (pid === null) {
-    return;
-  }
-
-  const { stdout } = await execAsync(
-    `ps -p ${pid} > /dev/null || echo "false"`
-  );
-  return stdout.trim() === "true";
-}
-
-async function clearPID(projectId: string, pid: number | null) {
-  await setProjectBuildPID(projectId, pid);
-  if (await checkPID(pid)) {
-    await killPID(pid);
-  }
-}
-
-async function buildAndRun(
+async function createApp(
   projectId: string,
   subDomain: string,
   projectEnv: ProjectSchema["env"]
-): Promise<number> {
-  const totalSteps = 14;
-  let lastStep = 0;
+): Promise<string> {
+  const dockerfile = `
+FROM ${process.env.APP_DOCKER_BASE_IMAGE} AS installer
+ENV PG_URL=${process.env.APP_PG_URL}
+ENV PROJECT_ID=${projectId}
+ENV NEXT_PUBLIC_UMAMI_ID=${projectEnv.NEXT_PUBLIC_UMAMI_ID}
+ENV NEXT_PUBLIC_UMAMI_URL=${process.env.APP_NEXT_PUBLIC_UMAMI_URL}
+ENV NEXT_PUBLIC_ICONIFY_API_URL=${process.env.APP_NEXT_PUBLIC_ICONIFY_API_URL}
+RUN pnpm run build
+FROM nginx:1.27.0 AS runner
+WORKDIR /app
+COPY --from=installer /app/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=installer /app/out /var/www/out`;
 
-  const tag = `${process.env.DOCKER_REGISTRY}/${subDomain}:latest`;
-
-  const buildExitCode = await new Promise<number | null>((resolve) => {
-    const dockerBuild = spawn("docker", [
-      "build",
-      "--build-arg",
-      `BASE_IMAGE=${process.env.DOCKER_BASE_IMAGE}`,
-      "--build-arg",
-      `PG_URL=${process.env.PG_URL}`,
-      "--build-arg",
-      `NEXT_PUBLIC_UMAMI_URL=${process.env.NEXT_PUBLIC_UMAMI_URL}`,
-      "--build-arg",
-      `NEXT_PUBLIC_ICONIFY_API_URL=${process.env.NEXT_PUBLIC_ICONIFY_API_URL}`,
-      "--build-arg",
-      `NEXT_PUBLIC_UMAMI_ID=${projectEnv.NEXT_PUBLIC_UMAMI_ID}`,
-      "--build-arg",
-      `PROJECT_ID=${projectId}`,
-      "--no-cache",
-      "--progress",
-      "plain",
-      //   "--platform",
-      //   "linux/amd64,linux/arm64",
-      "-f",
-      "Dockerfile.generator",
-      "-t",
-      tag,
-      ".",
-    ]);
-
-    const buildPID = dockerBuild.pid || null;
-    const catchFn = () => {
-      clearPID(projectId, buildPID).finally(() => {
-        resolve(1);
-      });
-    };
-
-    setProjectBuildPID(projectId, buildPID).catch(catchFn);
-
-    dockerBuild.stdout.on("data", (data) => {
-      console.log(`dockerBuild:stdout: ${data}`);
-    });
-
-    dockerBuild.stderr.on("data", (data) => {
-      const stepLine = `${data}`;
-      console.log("stepLine: ", stepLine);
-
-      if (stepLine.startsWith("#")) {
-        const buildStep = Number(stepLine.split(" ")[0]?.replace("#", ""));
-        if (buildStep > lastStep) {
-          lastStep = buildStep;
-          setProjectBuildStep(projectId, lastStep, totalSteps).catch(catchFn);
-        }
-      }
-
-      console.error(`dockerBuild:stderr: ${stepLine}`);
-    });
-
-    dockerBuild.on("close", (code) => {
-      console.log(`dockerBuild:child process exited with code ${code}`);
-      resolve(code);
-    });
-  });
-
-  if (buildExitCode !== 0) {
-    return 1;
-  }
-
-  const projectLabel = "hooore.project";
-  const { stdout, stderr } = await execAsync(
-    `docker inspect --format='{{index .Config.Labels "${projectLabel}"}}' ${subDomain} 2>/dev/null || echo "false"`
+  const res = await fetch(
+    `${process.env.COOLIFY_BASE_URL}/api/v1/applications/dockerfile`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: subDomain,
+        domains: `https://${subDomain}.${process.env.MAIN_HOST_DOMAIN}`,
+        server_uuid: process.env.COOLIFY_SERVER_UUID,
+        project_uuid: process.env.COOLIFY_PROJECT_UUID,
+        environment_name: process.env.COOLIFY_PROJECT_ENVIRONMENT_NAME,
+        dockerfile: Buffer.from(dockerfile).toString("base64"),
+      }),
+    }
   );
 
-  try {
-    await setProjectBuildStep(projectId, ++lastStep, totalSteps);
-  } catch {
-    return 1;
-  }
+  const resJson = (await res.json()) as { uuid: string };
+  return resJson.uuid;
+}
 
-  if (stderr) {
-    return 1;
-  }
+async function deployApp(appId: string): Promise<void> {
+  await fetch(
+    `${process.env.COOLIFY_BASE_URL}/api/v1/deploy?uuid=${appId}&force=true`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
+      },
+    }
+  );
+}
 
-  const isDeploymentExist = stdout.trim() === "true";
-  console.log(`dockerInspect:stdout: ${stdout}`);
-  console.error(`dockerInspect:stderr: ${stderr}`);
+async function getAppDeployment(appId: string) {
+  const res = await fetch(
+    `${process.env.COOLIFY_BASE_URL}/api/v1/deployments`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
+      },
+    }
+  );
 
-  if (isDeploymentExist) {
-    const { stdout, stderr } = await execAsync(
-      `docker stop ${subDomain} && docker rm ${subDomain}`
-    );
-    console.log(`dockerStopRm:stdout: ${stdout}`);
-    console.error(`dockerStopRm:stderr: ${stderr}`);
-  }
+  const resJson = (await res.json()) as {
+    deployment_url: string;
+    deployment_uuid: string;
+    logs: string;
+  }[];
 
-  try {
-    await setProjectBuildStep(projectId, ++lastStep, totalSteps);
-  } catch {
-    return 1;
-  }
+  return resJson.find((d) => d.deployment_url.includes(appId));
+}
 
-  const runExitCode = await new Promise<number | null>((resolve) => {
-    const dockerRun = spawn("docker", ["push", tag]);
+async function watchDeploymentLog(deploymentUUID: string) {
+  const res = await fetch(
+    `${process.env.COOLIFY_BASE_URL}/api/v1/deployments/${deploymentUUID}`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
+      },
+    }
+  );
 
-    dockerRun.stdout.on("data", (data) => {
-      console.log(`dockerRun:stdout: ${data}`);
-    });
+  return (await res.json()) as {
+    logs: string;
+    status: string;
+  };
+}
 
-    dockerRun.stderr.on("data", (data) => {
-      console.error(`dockerRun:stderr: ${data}`);
-    });
-
-    dockerRun.on("close", (code) => {
-      console.log(`dockerRun:child process exited with code ${code}`);
-      resolve(code);
-    });
-  });
-
-  try {
-    await setProjectBuildStep(projectId, ++lastStep, totalSteps);
-  } catch {
-    return 1;
-  }
-
-  if (runExitCode !== 0) {
-    return 1;
-  }
-
-  return 0;
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 const app = new Hono();
@@ -263,15 +185,38 @@ app.post("/api/publish/:projectId", async (c) => {
     });
   }
 
-  if (project.build_pid !== "") {
-    await clearPID(project.id, Number(project.build_pid));
+  let appId = project.app_id;
+  if (appId !== "") {
+    await deployApp(appId);
+  } else {
+    appId = await createApp(project.id, "bar", project.env);
+    await setProjectAppID(project.id, appId);
+    await deployApp(appId);
   }
 
-  buildAndRun(project.id, project.domain, project.env).then((res) => {
-    if (res === 0) {
-      setProjectBuildPID(project.id, null);
-    }
-  });
+  const deployment = await getAppDeployment(appId);
+  if (deployment) {
+    let step = 1;
+    const totalSteps = 12;
+
+    (async function inProgress() {
+      const deploymentLog = await watchDeploymentLog(
+        deployment.deployment_uuid
+      );
+      const logs = JSON.parse(deploymentLog.logs) as {
+        output: string;
+      }[];
+      const lastLog = logs?.findLast((log) => log.output.startsWith("#"));
+      step = Number(lastLog?.output.split(" ")[0]?.replace("#", ""));
+      if (step) {
+        await setProjectBuildStep(project.id, step, totalSteps);
+      }
+      if (deploymentLog.status !== "finished") {
+        await sleep(5 * 1000);
+        inProgress();
+      }
+    })();
+  }
 
   return new Response(JSON.stringify({ message: "Success." }), {
     status: 200,
