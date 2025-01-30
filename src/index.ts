@@ -189,7 +189,11 @@ app.post("/api/publish/:projectId", async (c) => {
   if (appId !== "") {
     await deployApp(appId);
   } else {
-    appId = await createApp(project.id, "bar", project.env);
+    appId = await createApp(
+      project.id,
+      project.business_name_slug,
+      project.env
+    );
     await setProjectAppID(project.id, appId);
     await deployApp(appId);
   }
