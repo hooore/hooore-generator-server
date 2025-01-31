@@ -7,12 +7,16 @@ import postgres from "postgres";
 const sql = postgres(process.env.PG_URL);
 
 type ProjectSchema = {
+  id: string;
+  user_id: string;
   business_name_slug: string;
   business_name: string;
   business_logo: string;
-  id: string;
-  user_id: string;
-  need_publish: boolean;
+  title: string;
+  description: string;
+  favico: string;
+  custom_domain: string;
+  use_custom_domain: boolean;
   app_id: string;
   build_last_step: number;
   build_total_step: number;
@@ -33,6 +37,11 @@ async function getProject(projectId: string, userId: string) {
             business_name,
             business_name_slug,
             business_logo,
+            title,
+            description,
+            favico,
+            custom_domain,
+            use_custom_domain,
             env,
             app_id,
             build_last_step,
@@ -60,7 +69,8 @@ async function setProjectBuildStep(
 
 async function createApp(
   projectId: string,
-  subDomain: string,
+  name: string,
+  domains: string,
   projectEnv: ProjectSchema["env"]
 ): Promise<string> {
   const dockerfile = `
@@ -85,12 +95,39 @@ COPY --from=installer /app/out /var/www/out`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        name: subDomain,
-        domains: `https://${subDomain}.${process.env.MAIN_HOST_DOMAIN}`,
+        name: name,
+        domains: domains,
         server_uuid: process.env.COOLIFY_SERVER_UUID,
         project_uuid: process.env.COOLIFY_PROJECT_UUID,
         environment_name: process.env.COOLIFY_PROJECT_ENVIRONMENT_NAME,
         dockerfile: Buffer.from(dockerfile).toString("base64"),
+        instant_deploy: true,
+      }),
+    }
+  );
+
+  const resJson = (await res.json()) as
+    | { uuid: string }
+    | { errors: { domains: string } };
+  if ("errors" in resJson) {
+    return await createApp(projectId, name, domains, projectEnv);
+  }
+  return resJson.uuid;
+}
+
+// Can't use this yet because: https://github.com/coollabsio/coolify/issues/4999
+async function updateApp(appId: string, newDomains: string): Promise<string> {
+  const res = await fetch(
+    `${process.env.COOLIFY_BASE_URL}/api/v1/applications/${appId}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        domains: newDomains,
+        instant_deploy: true,
       }),
     }
   );
@@ -99,15 +136,41 @@ COPY --from=installer /app/out /var/www/out`;
   return resJson.uuid;
 }
 
-async function deployApp(appId: string): Promise<void> {
-  await fetch(
-    `${process.env.COOLIFY_BASE_URL}/api/v1/deploy?uuid=${appId}&force=true`,
+async function getApp(appId: string): Promise<string> {
+  const res = await fetch(
+    `${process.env.COOLIFY_BASE_URL}/api/v1/applications/${appId}`,
     {
       headers: {
         Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
       },
     }
   );
+
+  const resJson = (await res.json()) as { uuid: string };
+  return resJson.uuid;
+}
+
+async function deleteApp(appId: string): Promise<string> {
+  const queryParams = new URLSearchParams({
+    delete_configurations: "true",
+    delete_volumes: "true",
+    docker_cleanup: "true",
+    delete_connected_networks: "true",
+  });
+  const res = await fetch(
+    `${
+      process.env.COOLIFY_BASE_URL
+    }/api/v1/applications/${appId}?${queryParams.toString()}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
+      },
+    }
+  );
+
+  const resJson = (await res.json()) as { uuid: string };
+  return resJson.uuid;
 }
 
 async function getAppDeployment(appId: string) {
@@ -149,6 +212,37 @@ async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function inProgress(
+  deploymentUUID: string,
+  projectId: string,
+  step: number,
+  totalSteps: number
+) {
+  const deploymentLog = await watchDeploymentLog(deploymentUUID);
+  const logs = JSON.parse(deploymentLog.logs) as {
+    output: string;
+  }[];
+  const lastLog = logs
+    ?.findLast((log) => log.output.startsWith("#"))
+    ?.output.split("\n")
+    .findLast((log) => log.startsWith("#"));
+  step = Number(lastLog?.split(" ")[0]?.replace("#", ""));
+  if (step) {
+    await setProjectBuildStep(projectId, step, totalSteps);
+  }
+  if (deploymentLog.status !== "finished") {
+    await sleep(5 * 1000);
+    inProgress(deploymentUUID, projectId, step, totalSteps);
+  }
+}
+
+async function waitAppDeleted(appId: string) {
+  const app = await getApp(appId);
+  if (app) {
+    await waitAppDeleted(appId);
+  }
+}
+
 const app = new Hono();
 
 app.use(cors());
@@ -186,45 +280,34 @@ app.post("/api/publish/:projectId", async (c) => {
   }
 
   let appId = project.app_id;
+  const appName = project.business_name_slug;
+  const domains =
+    project.use_custom_domain && project.custom_domain
+      ? `https://${project.custom_domain}`
+      : `https://${project.business_name_slug}.${process.env.MAIN_HOST_DOMAIN}`;
+  // Can't use this mechanism yet, because there is bug in Coolify's update app API
+  //   if (appId !== "") {
+  //     const newDomains =
+  //       project.use_custom_domain && project.custom_domain
+  //         ? `https://${project.custom_domain}`
+  //         : defaultDomains;
+  //     await updateApp(appId, newDomains);
+  //   } else {
+  //     appId = await createApp(project.id, appName, defaultDomains, project.env);
+  //     await setProjectAppID(project.id, appId);
+  //   }
   if (appId !== "") {
-    await deployApp(appId);
-  } else {
-    appId = await createApp(
-      project.id,
-      project.business_name_slug,
-      project.env
-    );
-    await setProjectAppID(project.id, appId);
-    await deployApp(appId);
+    await deleteApp(appId);
   }
+  await waitAppDeleted(appId);
+  appId = await createApp(project.id, appName, domains, project.env);
+  await setProjectAppID(project.id, appId);
 
   const deployment = await getAppDeployment(appId);
   if (deployment) {
     let step = 1;
     const totalSteps = 12;
-
-    (async function inProgress() {
-      const deploymentLog = await watchDeploymentLog(
-        deployment.deployment_uuid
-      );
-      const logs = JSON.parse(deploymentLog.logs) as {
-        output: string;
-      }[];
-      const lastLog = logs
-        ?.findLast((log) => log.output.startsWith("#"))
-        ?.output.split("\n")
-        .findLast((log) => log.startsWith("#"));
-      step = Number(lastLog?.split(" ")[0]?.replace("#", ""));
-      console.log("step", step);
-      console.log("lastLog", lastLog);
-      if (step) {
-        await setProjectBuildStep(project.id, step, totalSteps);
-      }
-      if (deploymentLog.status !== "finished") {
-        await sleep(5 * 1000);
-        inProgress();
-      }
-    })();
+    inProgress(deployment.deployment_uuid, project.id, step, totalSteps);
   }
 
   return new Response(JSON.stringify({ message: "Success." }), {
