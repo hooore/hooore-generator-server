@@ -5,7 +5,14 @@ FROM base AS builder
 WORKDIR /app
 
 COPY package*json yarn.lock* package-lock.json* pnpm-lock.yaml* tsconfig.json ./
-RUN corepack enable pnpm && pnpm i
+
+# https://github.com/pnpm/pnpm/issues/9029
+# https://github.com/nodejs/corepack/issues/612
+RUN npm install -g corepack@latest
+
+RUN corepack enable
+RUN corepack prepare pnpm --activate
+RUN pnpm install --frozen-lockfile
 
 COPY . .
 RUN npm run build
