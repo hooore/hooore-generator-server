@@ -13,7 +13,6 @@ declare namespace NodeJS {
     APP_PG_URL: string;
     APP_NEXT_PUBLIC_UMAMI_URL: string;
     APP_NEXT_PUBLIC_ICONIFY_API_URL: string;
-    APP_DOCKER_REGISTRY: string;
     APP_DOCKER_BASE_IMAGE: string;
   }
 }
