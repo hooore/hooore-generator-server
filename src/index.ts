@@ -136,43 +136,6 @@ async function updateApp(appId: string, newDomains: string): Promise<string> {
   return resJson.uuid;
 }
 
-async function getApp(appId: string): Promise<string> {
-  const res = await fetch(
-    `${process.env.COOLIFY_BASE_URL}/api/v1/applications/${appId}`,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
-      },
-    }
-  );
-
-  const resJson = (await res.json()) as { uuid: string };
-  return resJson.uuid;
-}
-
-async function deleteApp(appId: string): Promise<string> {
-  const queryParams = new URLSearchParams({
-    delete_configurations: "true",
-    delete_volumes: "true",
-    docker_cleanup: "true",
-    delete_connected_networks: "true",
-  });
-  const res = await fetch(
-    `${
-      process.env.COOLIFY_BASE_URL
-    }/api/v1/applications/${appId}?${queryParams.toString()}`,
-    {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
-      },
-    }
-  );
-
-  const resJson = (await res.json()) as { uuid: string };
-  return resJson.uuid;
-}
-
 async function getAppDeployment(appId: string) {
   const res = await fetch(
     `${process.env.COOLIFY_BASE_URL}/api/v1/deployments`,
@@ -236,13 +199,6 @@ async function inProgress(
   }
 }
 
-async function waitAppDeleted(appId: string) {
-  const app = await getApp(appId);
-  if (app) {
-    await waitAppDeleted(appId);
-  }
-}
-
 const app = new Hono();
 
 app.use(cors());
@@ -285,23 +241,12 @@ app.post("/api/publish/:projectId", async (c) => {
     project.use_custom_domain && project.custom_domain
       ? `https://${project.custom_domain}`
       : `https://${project.business_name_slug}.${process.env.MAIN_HOST_DOMAIN}`;
-  // Can't use this mechanism yet, because there is bug in Coolify's update app API
-  //   if (appId !== "") {
-  //     const newDomains =
-  //       project.use_custom_domain && project.custom_domain
-  //         ? `https://${project.custom_domain}`
-  //         : defaultDomains;
-  //     await updateApp(appId, newDomains);
-  //   } else {
-  //     appId = await createApp(project.id, appName, defaultDomains, project.env);
-  //     await setProjectAppID(project.id, appId);
-  //   }
   if (appId !== "") {
-    await deleteApp(appId);
+    await updateApp(appId, domains);
+  } else {
+    appId = await createApp(project.id, appName, domains, project.env);
+    await setProjectAppID(project.id, appId);
   }
-  await waitAppDeleted(appId);
-  appId = await createApp(project.id, appName, domains, project.env);
-  await setProjectAppID(project.id, appId);
 
   const deployment = await getAppDeployment(appId);
   if (deployment) {
