@@ -115,7 +115,16 @@ COPY --from=installer /app/out /var/www/out`;
   return resJson.uuid;
 }
 
-// Can't use this yet because: https://github.com/coollabsio/coolify/issues/4999
+async function deployApp(appId: string): Promise<string> {
+  await fetch(`${process.env.COOLIFY_BASE_URL}/api/v1/deploy?uuid=${appId}`, {
+    headers: {
+      Authorization: `Bearer ${process.env.COOLIFY_API_TOKEN}`,
+    },
+  });
+
+  return appId;
+}
+
 async function updateApp(appId: string, newDomains: string): Promise<string> {
   const res = await fetch(
     `${process.env.COOLIFY_BASE_URL}/api/v1/applications/${appId}`,
@@ -127,7 +136,7 @@ async function updateApp(appId: string, newDomains: string): Promise<string> {
       },
       body: JSON.stringify({
         domains: newDomains,
-        instant_deploy: true,
+        instant_deploy: false,
       }),
     }
   );
@@ -243,6 +252,7 @@ app.post("/api/publish/:projectId", async (c) => {
       : `https://${project.business_name_slug}.${process.env.MAIN_HOST_DOMAIN}`;
   if (appId !== "") {
     await updateApp(appId, domains);
+    await deployApp(appId);
   } else {
     appId = await createApp(project.id, appName, domains, project.env);
     await setProjectAppID(project.id, appId);
