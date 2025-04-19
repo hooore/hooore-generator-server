@@ -80,7 +80,7 @@ ENV PROJECT_ID=${projectId}
 ENV NEXT_PUBLIC_UMAMI_ID=${projectEnv.NEXT_PUBLIC_UMAMI_ID}
 ENV NEXT_PUBLIC_UMAMI_URL=${process.env.APP_NEXT_PUBLIC_UMAMI_URL}
 ENV NEXT_PUBLIC_ICONIFY_API_URL=${process.env.APP_NEXT_PUBLIC_ICONIFY_API_URL}
-RUN pnpm run build
+RUN pnpm run build:apps
 FROM nginx:1.27.0 AS runner
 WORKDIR /app
 COPY --from=installer /app/nginx.conf /etc/nginx/conf.d/default.conf
